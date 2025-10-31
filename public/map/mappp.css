@@ -581,34 +581,6 @@
     font-weight: 600;
 }
 
-.status-panel #voiceBtn {
-    margin-top: 8px;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    border: none;
-    padding: 12px 20px;
-    border-radius: 10px;
-    cursor: pointer;
-    font-size: 15px;
-    font-weight: 600;
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.status-panel #voiceBtn .btn-icon {
-    font-size: 18px;
-}
-
-.status-panel #voiceBtn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-}
-
 /* Mobile permission popup adjustments */
 @media screen and (max-width: 768px) {
     .permission-popup {

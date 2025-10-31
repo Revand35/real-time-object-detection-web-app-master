@@ -9,6 +9,8 @@ import { subscribeDetections, DetectedObject } from '../lib/detectionsBus';
 // - Provides status panel, debug panel, and a permission flow
 
 type LatLng = { lat: number; lng: number };
+type RouteLocation = { lat: number; lng: number; name: string };
+type Route = { id: number; name: string; start: RouteLocation | null; end: RouteLocation | null };
 
 // Known cities and districts list - expanded for better coverage (from map/index.js)
 const knownCities: Record<string, { lat: number; lng: number; name: string }> = {
@@ -115,6 +117,19 @@ export default function MapReactPage() {
     const [voiceStatus, setVoiceStatus] = useState<string>('Senavision siap. Ucapkan tujuan Anda.');
     const recognitionRef = useRef<any>(null);
     const isListeningRef = useRef<boolean>(false);
+    
+    // Navigation tracking variables
+    const currentRouteDataRef = useRef<any>(null);
+    const isNavigatingRef = useRef<boolean>(false);
+    const lastAnnouncedInstructionRef = useRef<string | null>(null);
+    const announcedInstructionsRef = useRef<string[]>([]);
+    
+    // Routes management
+    const [savedRoutes, setSavedRoutes] = useState<Route[]>([]);
+    const [editingRoute, setEditingRoute] = useState<Route | null>(null);
+    const [formStart, setFormStart] = useState('');
+    const [formEnd, setFormEnd] = useState('');
+    const [formStatus, setFormStatus] = useState<{ type: 'success' | 'error' | 'loading'; message: string } | null>(null);
 
     const getL = () => (typeof window !== 'undefined' ? (window as any).L : null);
 
@@ -212,37 +227,66 @@ export default function MapReactPage() {
         // Delay announcement to ensure page is loaded
         const timeout = setTimeout(() => {
             if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-                speak(welcomeText);
                 setVoiceStatus('📢 Memutar panduan penggunaan...');
+                speak(welcomeText, () => {
+                    // After welcome guide finishes, activate microphone
+                    console.log('✅ Welcome guide finished - activating microphone');
+                    toggleVoiceListening();
+                });
             }
         }, 2000);
         
         return () => clearTimeout(timeout);
     }, []);
 
+    // Initialize saved routes from localStorage
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        
+        const savedRoutesData = localStorage.getItem('senavision_saved_routes');
+        if (savedRoutesData) {
+            try {
+                const routes = JSON.parse(savedRoutesData);
+                setSavedRoutes(routes);
+            } catch (error) {
+                console.error('Error loading routes:', error);
+                // Initialize with empty routes
+                const emptyRoutes: Route[] = [
+                    { id: 1, name: 'Rute 1', start: null, end: null },
+                    { id: 2, name: 'Rute 2', start: null, end: null },
+                    { id: 3, name: 'Rute 3', start: null, end: null },
+                    { id: 4, name: 'Rute 4', start: null, end: null },
+                    { id: 5, name: 'Rute 5', start: null, end: null },
+                    { id: 6, name: 'Rute 6', start: null, end: null }
+                ];
+                setSavedRoutes(emptyRoutes);
+                localStorage.setItem('senavision_saved_routes', JSON.stringify(emptyRoutes));
+            }
+        } else {
+            // Initialize with empty routes
+            const emptyRoutes: Route[] = [
+                { id: 1, name: 'Rute 1', start: null, end: null },
+                { id: 2, name: 'Rute 2', start: null, end: null },
+                { id: 3, name: 'Rute 3', start: null, end: null },
+                { id: 4, name: 'Rute 4', start: null, end: null },
+                { id: 5, name: 'Rute 5', start: null, end: null },
+                { id: 6, name: 'Rute 6', start: null, end: null }
+            ];
+            setSavedRoutes(emptyRoutes);
+            localStorage.setItem('senavision_saved_routes', JSON.stringify(emptyRoutes));
+        }
+    }, []);
+
+    // Auto-save routes to localStorage whenever savedRoutes changes
+    useEffect(() => {
+        if (savedRoutes.length > 0) {
+            saveRoutesToLocalStorage();
+        }
+    }, [savedRoutes]);
+
     function requestLocationPermission() {
         // Simply close the popup and let watchPosition prompt
         setPermissionOpen(false);
-    }
-
-    function setDestinationFromInput() {
-        const input = document.getElementById('routeEndInput') as HTMLInputElement | null;
-        if (!input || !input.value.trim()) return;
-        const parts = input.value.split(',').map((s) => s.trim());
-        if (parts.length !== 2) return;
-        const lat = Number(parts[0]);
-        const lng = Number(parts[1]);
-        if (Number.isNaN(lat) || Number.isNaN(lng)) return;
-        const L = getL();
-        if (!L || !mapRef.current) return;
-
-        const dest = { lat, lng };
-        setDestination(dest);
-        const destLatLng = L.latLng(lat, lng);
-        if (destMarkerRef.current) destMarkerRef.current.setLatLng(destLatLng);
-        else destMarkerRef.current = L.marker(destLatLng).addTo(mapRef.current);
-
-        if (userMarkerRef.current) drawRoute(userMarkerRef.current.getLatLng(), destLatLng);
     }
 
     function drawRoute(start: any, end: any) {
@@ -322,7 +366,7 @@ export default function MapReactPage() {
         return unsubscribe;
     }, []);
 
-    function speak(text: string) {
+    function speak(text: string, onComplete?: () => void) {
         try {
             if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
             const utterance = new SpeechSynthesisUtterance(text);
@@ -330,6 +374,14 @@ export default function MapReactPage() {
             utterance.rate = 1.05;
             utterance.pitch = 1;
             window.speechSynthesis.cancel();
+            
+            // Add onComplete callback support
+            if (onComplete) {
+                utterance.onend = function() {
+                    setTimeout(onComplete, 100);
+                };
+            }
+            
             window.speechSynthesis.speak(utterance);
         } catch {}
     }
@@ -367,7 +419,41 @@ export default function MapReactPage() {
         recog.interimResults = true;
         recog.onstart = () => setVoiceStatus('Mikrofon aktif. Ucapkan tujuan Anda.');
         recog.onerror = () => setVoiceStatus('Error mikrofon. Coba lagi.');
-        recog.onend = () => { isListeningRef.current = false; setVoiceStatus('Mikrofon berhenti.'); };
+        recog.onend = () => { 
+            isListeningRef.current = false; 
+            setVoiceStatus('Mikrofon berhenti.');
+            
+            // Auto-restart microphone if it was listening (for continuous operation)
+            // But only if: 1. It wasn't stopped intentionally, 2. Navigation is not active
+            if (recognitionRef.current && !isListeningRef.current) {
+                // @ts-ignore - dynamic property
+                const wasStopped = recognitionRef.current._stopped;
+                const isNavigating = isNavigatingRef.current;
+                
+                if (!wasStopped && !isNavigating) {
+                    setTimeout(() => {
+                        if (recognitionRef.current && !isListeningRef.current) {
+                            // @ts-ignore - dynamic property
+                            if (!recognitionRef.current._stopped && !isNavigatingRef.current) {
+                                try {
+                                    recognitionRef.current.start();
+                                    isListeningRef.current = true;
+                                    console.log('🔄 Microphone auto-restarted');
+                                } catch (error) {
+                                    console.log('⚠️ Could not restart microphone:', error);
+                                    // @ts-ignore - dynamic property
+                                    recognitionRef.current._stopped = true;
+                                }
+                            } else if (isNavigatingRef.current) {
+                                console.log('ℹ️ Navigation active - microphone auto-restart disabled (say "Halo" to reactivate)');
+                            }
+                        }
+                    }, 1000);
+                } else if (isNavigating) {
+                    console.log('ℹ️ Navigation active - microphone will not auto-restart (say "Halo" to reactivate)');
+                }
+            }
+        };
         recog.onresult = (event: any) => {
             let finalText = '';
             for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -390,9 +476,109 @@ export default function MapReactPage() {
         
         // Check for "Halo" activation
         if (cleanCommand === 'halo' || cleanCommand === 'hello' || cleanCommand === 'aktivasi' || cleanCommand === 'activate' || cleanCommand === 'buka mikrofon' || cleanCommand === 'aktifkan') {
+            console.log('✅ "Halo" command detected');
+            
+            // CRITICAL: Always clear stopped flag when user says "Halo"
+            if (recognitionRef.current) {
+                // @ts-ignore - dynamic property
+                if (recognitionRef.current._stopped) {
+                    // @ts-ignore - dynamic property
+                    recognitionRef.current._stopped = false;
+                    console.log('🎤 Clearing stopped flag via "Halo" command');
+                }
+            }
+            
             if (!isListeningRef.current) {
-                speak('Mikrofon aktif. Ucapkan nama kota atau lokasi tujuan Anda');
-                setVoiceStatus('🎤 Mikrofon aktif. Sebutkan tujuan Anda.');
+                // Need to re-initialize recognition if not exists
+                if (!recognitionRef.current) {
+                    const SpeechRecognition: any = (typeof window !== 'undefined') && ((window as any).webkitSpeechRecognition || (window as any).SpeechRecognition);
+                    if (!SpeechRecognition) {
+                        setVoiceStatus('Speech recognition tidak didukung browser ini.');
+                        return;
+                    }
+                    // Initialize recognition with same logic as toggleVoiceListening
+                    const recog = new SpeechRecognition();
+                    recog.lang = 'id-ID';
+                    recog.continuous = true;
+                    recog.interimResults = true;
+                    recog.onstart = () => setVoiceStatus('Mikrofon aktif. Ucapkan tujuan Anda.');
+                    recog.onerror = () => setVoiceStatus('Error mikrofon. Coba lagi.');
+                    recog.onend = () => { 
+                        isListeningRef.current = false; 
+                        setVoiceStatus('Mikrofon berhenti.');
+                        
+                        // Auto-restart logic (same as toggleVoiceListening)
+                        if (recognitionRef.current && !isListeningRef.current) {
+                            // @ts-ignore - dynamic property
+                            const wasStopped = recognitionRef.current._stopped;
+                            const isNavigating = isNavigatingRef.current;
+                            
+                            if (!wasStopped && !isNavigating) {
+                                setTimeout(() => {
+                                    if (recognitionRef.current && !isListeningRef.current) {
+                                        // @ts-ignore - dynamic property
+                                        if (!recognitionRef.current._stopped && !isNavigatingRef.current) {
+                                            try {
+                                                recognitionRef.current.start();
+                                                isListeningRef.current = true;
+                                                console.log('🔄 Microphone auto-restarted');
+                                            } catch (error) {
+                                                console.log('⚠️ Could not restart microphone:', error);
+                                                // @ts-ignore - dynamic property
+                                                recognitionRef.current._stopped = true;
+                                            }
+                                        } else if (isNavigatingRef.current) {
+                                            console.log('ℹ️ Navigation active - microphone auto-restart disabled (say "Halo" to reactivate)');
+                                        }
+                                    }
+                                }, 1000);
+                            } else if (isNavigating) {
+                                console.log('ℹ️ Navigation active - microphone will not auto-restart (say "Halo" to reactivate)');
+                            }
+                        }
+                    };
+                    recog.onresult = (event: any) => {
+                        let finalText = '';
+                        for (let i = event.resultIndex; i < event.results.length; i++) {
+                            const res = event.results[i];
+                            if (res.isFinal) finalText += res[0].transcript;
+                        }
+                        if (finalText) {
+                            const cmd = finalText.toLowerCase().trim();
+                            setVoiceStatus(`Saya dengar: "${cmd}"`);
+                            handleVoiceCommand(cmd);
+                        }
+                    };
+                    recognitionRef.current = recog;
+                }
+                
+                // Small delay to ensure recognition is ready
+                setTimeout(() => {
+                    if (recognitionRef.current && !isListeningRef.current) {
+                        try {
+                            recognitionRef.current.start();
+                            isListeningRef.current = true;
+                            console.log('✅ Microphone started successfully via "Halo"');
+                            
+                            // Give different messages based on navigation state
+                            if (isNavigatingRef.current) {
+                                setVoiceStatus('🎤 Mikrofon aktif kembali. Sebutkan tujuan baru atau ucapkan nama rute.');
+                                speak('Mikrofon aktif kembali. Sebutkan tujuan baru atau ucapkan nama rute untuk mengubah rute');
+                            } else {
+                                setVoiceStatus('🎤 Mikrofon aktif. Ucapkan nama rute atau sebutkan tujuan Anda.');
+                                speak('Mikrofon aktif. Ucapkan nama rute seperti "Rute Satu" atau sebutkan nama kota atau lokasi tujuan Anda');
+                            }
+                        } catch (error: any) {
+                            console.error('❌ Failed to start microphone:', error);
+                            if (error.message && error.message.includes('not-allowed')) {
+                                setVoiceStatus('⚠️ Klik layar sekali untuk mengaktifkan mikrofon');
+                                speak('Klik layar terlebih dahulu sekali untuk mengaktifkan mikrofon');
+                            } else {
+                                setVoiceStatus('⚠️ Error: ' + error.message);
+                            }
+                        }
+                    }
+                }, 100);
             } else {
                 speak('Mikrofon sudah aktif');
                 setVoiceStatus('🎤 Mikrofon sudah aktif');
@@ -402,8 +588,37 @@ export default function MapReactPage() {
         
         // Check for navigation commands
         if (cleanCommand === 'navigasi' || cleanCommand === 'mulai' || cleanCommand.includes('mulai rute') || cleanCommand.includes('mulai navigasi')) {
+            console.log('✅ Navigation command detected:', cleanCommand);
+            
+            // CRITICAL: Setelah "Navigasi" dikatakan, mikrofon HARUS MATI
+            // Mikrofon hanya bisa diaktifkan lagi dengan "Halo" atau klik layar
+            if (recognitionRef.current) {
+                // Set stopped flag - mikrofon mati setelah "Navigasi"
+                // @ts-ignore - dynamic property
+                recognitionRef.current._stopped = true;
+                console.log('🔇 Microphone stopped after "Navigasi" command - user must say "Halo" or click to reactivate');
+                
+                // @ts-ignore - dynamic property
+                if (recognitionRef.current._waitingForNavigasi) {
+                    // @ts-ignore - dynamic property
+                    recognitionRef.current._waitingForNavigasi = false; // Clear waiting flag - we got Navigasi command
+                    console.log('✅ "Navigasi" command received - canceling auto-stop timer');
+                }
+            }
+            
+            // Stop microphone - mikrofon MATI setelah "Navigasi"
+            if (isListeningRef.current && recognitionRef.current) {
+                recognitionRef.current.stop();
+                isListeningRef.current = false;
+                console.log('🔇 Microphone stopped - navigation started, say "Halo" or click to reactivate');
+            }
+            
+            // For now, just announce navigation started (full implementation needs turn-by-turn functions)
             speak('Navigasi dimulai. Ikuti petunjuk arah.');
             setVoiceStatus('📍 Navigasi dimulai');
+            
+            // Set navigating flag
+            isNavigatingRef.current = true;
             return;
         }
         
@@ -448,7 +663,51 @@ export default function MapReactPage() {
             if (destMarkerRef.current) destMarkerRef.current.setLatLng(latlng);
             else destMarkerRef.current = L.marker(latlng).addTo(mapRef.current);
             if (userMarkerRef.current) drawRoute(userMarkerRef.current.getLatLng(), latlng);
-            speak(`Tujuan: ${city.name}. Menghitung rute.`);
+            
+            // Stop microphone briefly to announce destination, then restart for "Navigasi" command
+            if (isListeningRef.current && recognitionRef.current) {
+                recognitionRef.current.stop();
+                isListeningRef.current = false;
+            }
+            
+            // Announce destination with callback to give instruction
+            speak(`Tujuan Anda adalah ${city.name}`, () => {
+                speak('Jika ingin mengganti tujuan sebutkan lokasi dan jika tidak katakan navigasi untuk memulai perjalanan', () => {
+                    // Restart microphone to listen for "Navigasi" command (window of 10 seconds)
+                    setTimeout(() => {
+                        if (recognitionRef.current && !isListeningRef.current) {
+                            try {
+                                recognitionRef.current.start();
+                                isListeningRef.current = true;
+                                // @ts-ignore - dynamic property
+                                recognitionRef.current._waitingForNavigasi = true;
+                                console.log('🎤 Microphone restarted - listening for "Navigasi" command (10 second window)');
+                                
+                                // Auto-stop after 10 seconds if "Navigasi" not said
+                                setTimeout(() => {
+                                    // @ts-ignore - dynamic property
+                                    if (recognitionRef.current && recognitionRef.current._waitingForNavigasi && isListeningRef.current) {
+                                        recognitionRef.current.stop();
+                                        // @ts-ignore - dynamic property
+                                        recognitionRef.current._stopped = true;
+                                        // @ts-ignore - dynamic property
+                                        recognitionRef.current._waitingForNavigasi = false;
+                                        isListeningRef.current = false;
+                                        console.log('🔇 Microphone stopped - "Navigasi" window expired, say "Halo" to restart');
+                                        setVoiceStatus(`✅ Tujuan: ${city.name} - Ucapkan "Halo" lalu "Navigasi" untuk memulai`);
+                                    }
+                                }, 10000); // 10 second window
+                            } catch (error) {
+                                console.error('Failed to restart microphone:', error);
+                                // @ts-ignore - dynamic property
+                                recognitionRef.current._stopped = true;
+                            }
+                        }
+                    }, 500);
+                });
+            });
+            
+            setVoiceStatus(`✅ Tujuan: ${city.name} - Ucapkan "Navigasi" untuk memulai`);
             return;
         }
         
@@ -463,18 +722,201 @@ export default function MapReactPage() {
                 if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
                     const L = getL();
                     if (!L || !mapRef.current) return;
+                    const fullName = data[0].display_name || data[0].name;
                     setDestination({ lat, lng });
                     const latlng = L.latLng(lat, lng);
                     if (destMarkerRef.current) destMarkerRef.current.setLatLng(latlng);
                     else destMarkerRef.current = L.marker(latlng).addTo(mapRef.current);
                     if (userMarkerRef.current) drawRoute(userMarkerRef.current.getLatLng(), latlng);
-                    speak('Tujuan ditemukan. Menghitung rute.');
+                    
+                    // Shorten address to remove country and province
+                    const shortName = fullName.split(',').slice(0, 3).join(', ').trim();
+                    
+                    // Stop microphone briefly to announce destination, then restart for "Navigasi" command
+                    if (isListeningRef.current && recognitionRef.current) {
+                        recognitionRef.current.stop();
+                        isListeningRef.current = false;
+                    }
+                    
+                    // Announce shortened destination name
+                    speak(`Tujuan Anda adalah ${shortName}`, () => {
+                        speak('Jika ingin mengganti tujuan sebutkan lokasi dan jika tidak katakan navigasi untuk memulai perjalanan', () => {
+                            // Restart microphone to listen for "Navigasi" command (window of 10 seconds)
+                            setTimeout(() => {
+                                if (recognitionRef.current && !isListeningRef.current) {
+                                    try {
+                                        recognitionRef.current.start();
+                                        isListeningRef.current = true;
+                                        // @ts-ignore - dynamic property
+                                        recognitionRef.current._waitingForNavigasi = true;
+                                        console.log('🎤 Microphone restarted - listening for "Navigasi" command (10 second window)');
+                                        
+                                        // Auto-stop after 10 seconds if "Navigasi" not said
+                                        setTimeout(() => {
+                                            // @ts-ignore - dynamic property
+                                            if (recognitionRef.current && recognitionRef.current._waitingForNavigasi && isListeningRef.current) {
+                                                recognitionRef.current.stop();
+                                                // @ts-ignore - dynamic property
+                                                recognitionRef.current._stopped = true;
+                                                // @ts-ignore - dynamic property
+                                                recognitionRef.current._waitingForNavigasi = false;
+                                                isListeningRef.current = false;
+                                                console.log('🔇 Microphone stopped - "Navigasi" window expired, say "Halo" to restart');
+                                                setVoiceStatus(`✅ Tujuan: ${shortName} - Ucapkan "Halo" lalu "Navigasi" untuk memulai`);
+                                            }
+                                        }, 10000); // 10 second window
+                                    } catch (error) {
+                                        console.error('Failed to restart microphone:', error);
+                                        // @ts-ignore - dynamic property
+                                        recognitionRef.current._stopped = true;
+                                    }
+                                }
+                            }, 500);
+                        });
+                    });
+                    
+                    setVoiceStatus(`✅ Tujuan: ${shortName} - Ucapkan "Navigasi" untuk memulai`);
                     return;
                 }
             }
             speak('Tujuan tidak ditemukan. Coba sebutkan nama lokasi lain.');
         } catch {
             speak('Terjadi kesalahan saat mencari lokasi.');
+        }
+    }
+
+    // ========== ROUTES MANAGEMENT FUNCTIONS ==========
+    
+    // Save routes to localStorage
+    function saveRoutesToLocalStorage() {
+        if (typeof window === 'undefined') return;
+        try {
+            localStorage.setItem('senavision_saved_routes', JSON.stringify(savedRoutes));
+        } catch (error) {
+            console.error('Error saving routes:', error);
+        }
+    }
+
+    // Helper: Geocode location from name
+    async function geocodeLocation(locationName: string): Promise<RouteLocation | null> {
+        // Check known cities first
+        const cityKey = locationName.toLowerCase().trim().replace(/[.,;:!?]/g, '');
+        if (knownCities[cityKey]) {
+            return knownCities[cityKey];
+        }
+        
+        // Try Nominatim geocoding
+        try {
+            const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(locationName)}&format=json&limit=1&countrycodes=id&accept-language=id`;
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (Array.isArray(data) && data.length > 0) {
+                return {
+                    lat: parseFloat(data[0].lat),
+                    lng: parseFloat(data[0].lon),
+                    name: data[0].display_name
+                };
+            }
+        } catch (error) {
+            console.error('Geocoding error:', error);
+        }
+        return null;
+    }
+
+    // Edit route
+    function editRoute(route: Route) {
+        setEditingRoute(route);
+        setFormStart(route.start?.name || '');
+        setFormEnd(route.end?.name || '');
+        setFormStatus(null);
+    }
+
+    // Cancel editing
+    function cancelRouteForm() {
+        setEditingRoute(null);
+        setFormStart('');
+        setFormEnd('');
+        setFormStatus(null);
+    }
+
+    // Save route from form
+    async function saveRouteForm(event: React.FormEvent) {
+        event.preventDefault();
+        
+        if (!editingRoute) return;
+        if (!formStart.trim() || !formEnd.trim()) {
+            setFormStatus({ type: 'error', message: 'Lokasi awal dan tujuan harus diisi!' });
+            return;
+        }
+
+        setFormStatus({ type: 'loading', message: '⏳ Mencari lokasi...' });
+
+        try {
+            const startLocation = await geocodeLocation(formStart);
+            if (!startLocation) {
+                throw new Error('Lokasi awal tidak ditemukan: ' + formStart);
+            }
+
+            const endLocation = await geocodeLocation(formEnd);
+            if (!endLocation) {
+                throw new Error('Lokasi tujuan tidak ditemukan: ' + formEnd);
+            }
+
+            // Update route
+            const updatedRoutes = savedRoutes.map(r => 
+                r.id === editingRoute.id 
+                    ? { ...r, start: startLocation, end: endLocation }
+                    : r
+            );
+            setSavedRoutes(updatedRoutes);
+            
+            setFormStatus({ type: 'success', message: '✅ Rute berhasil disimpan!' });
+            speak(`Rute ${editingRoute.id} berhasil disimpan. Dari ${startLocation.name} ke ${endLocation.name}`);
+            
+            setTimeout(() => {
+                cancelRouteForm();
+            }, 1500);
+        } catch (error: any) {
+            setFormStatus({ type: 'error', message: '❌ ' + (error.message || 'Gagal menyimpan rute') });
+        }
+    }
+
+    // Delete route
+    function deleteRoute(route: Route) {
+        if (!route.start || !route.end) return;
+        
+        const confirmed = confirm(`Apakah Anda yakin ingin menghapus ${route.name}?\n\nDari: ${route.start.name}\nKe: ${route.end.name}`);
+        if (!confirmed) return;
+
+        const updatedRoutes = savedRoutes.map(r => 
+            r.id === route.id ? { ...r, start: null, end: null } : r
+        );
+        setSavedRoutes(updatedRoutes);
+        speak(`${route.name} telah dihapus`);
+    }
+
+    // Helper function to parse distance from text (e.g., "150 m" -> 150)
+    function parseDistance(distanceText: string): number {
+        if (!distanceText) return 0;
+        const text = distanceText.trim().toLowerCase();
+        if (text.includes('km')) {
+            const km = parseFloat(text.replace('km', '').trim());
+            return km * 1000;
+        }
+        if (text.includes('m')) {
+            const m = parseFloat(text.replace('m', '').trim());
+            return m;
+        }
+        return 0;
+    }
+
+    // Format distance for display (meter to "150 m" or "1.5 km")
+    function formatDistance(meters: number): string {
+        if (meters >= 1000) {
+            const km = (meters / 1000).toFixed(1);
+            return km + ' km';
+        } else {
+            return Math.round(meters) + ' m';
         }
     }
 
@@ -523,18 +965,6 @@ export default function MapReactPage() {
                     <p>Shows route from your current location to destination</p>
                     <p className="route-update-info">Route updates automatically</p>
                 </div>
-
-                <div style={{ marginTop: 12 }}>
-                    <input id="routeEndInput" placeholder="lat,lng (contoh: -6.2,106.8)" className="route-input" />
-                    <button id="retryBtn" onClick={setDestinationFromInput}>
-                        <span className="btn-icon">🎯</span>
-                        <span>Set Destination</span>
-                    </button>
-                    <button onClick={toggleVoiceListening} id="voiceBtn">
-                        <span className="btn-icon">🎤</span>
-                        <span>{isListeningRef.current ? 'Matikan Mikrofon' : 'Aktifkan Mikrofon'}</span>
-                    </button>
-                </div>
             </div>
 
             {/* Debug Panel */}
@@ -552,7 +982,7 @@ export default function MapReactPage() {
                 </div>
             )}
 
-            {/* Route Management Panel (UI shell only) */}
+            {/* Route Management Panel */}
             {routePanelOpen && (
                 <div id="routeManagementPanel" className="route-management-panel active" style={{ display: 'flex' }}>
                     <button id="closeRoutePanelBtn" className="close-panel-btn" onClick={toggleRouteManagementPanel} aria-label="Tutup panel rute">✖️</button>
@@ -561,9 +991,81 @@ export default function MapReactPage() {
                         <button id="routePanelToggleBtn" className="route-toggle-btn" onClick={toggleRouteManagementPanel} title="Tutup/Buka panel">✖️</button>
                     </div>
                     <div className="route-panel-content">
-                        <p className="route-panel-description">Atur slot rute untuk navigasi. (WIP)</p>
-                        <div id="routeListContainer" className="route-list-container" />
-                        <div id="routeFormContainer" className="route-form-container" style={{ display: 'none' }} />
+                        <p className="route-panel-description">Atur slot rute untuk navigasi.</p>
+                        
+                        {/* Route List */}
+                        <div className="route-list-container">
+                            {savedRoutes.map(route => (
+                                <div key={route.id} className={`route-item ${route.start && route.end ? '' : 'empty'}`}>
+                                    <div className="route-item-header">
+                                        <span className="route-item-name">{route.name}</span>
+                                        <div className="route-item-actions">
+                                            <button className="route-item-btn" onClick={() => editRoute(route)} title="Edit rute">✏️ Edit</button>
+                                            {route.start && route.end && (
+                                                <button className="route-item-btn delete" onClick={() => deleteRoute(route)} title="Hapus rute">🗑️ Hapus</button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className={`route-item-content ${!route.start || !route.end ? 'empty-content' : ''}`}>
+                                        {!route.start || !route.end ? (
+                                            <em>Rute kosong - Klik Edit untuk mengisi</em>
+                                        ) : (
+                                            <div className="route-item-path">
+                                                <strong>Dari:</strong> {route.start.name}<br />
+                                                <strong>Ke:</strong> {route.end.name}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Route Form */}
+                        {editingRoute && (
+                            <div className="route-form-container" style={{ display: 'block' }}>
+                                <h4 className="route-form-title">Edit {editingRoute.name}</h4>
+                                <form onSubmit={saveRouteForm}>
+                                    <div className="form-group">
+                                        <label htmlFor="routeStart">📍 Lokasi Awal:</label>
+                                        <input 
+                                            type="text" 
+                                            id="routeStart" 
+                                            className="route-input" 
+                                            placeholder="Contoh: Jakarta" 
+                                            value={formStart}
+                                            onChange={(e) => setFormStart(e.target.value)}
+                                            required 
+                                        />
+                                        <small className="form-hint">Masukkan nama lokasi awal</small>
+                                    </div>
+                                    
+                                    <div className="form-group">
+                                        <label htmlFor="routeEnd">🎯 Lokasi Tujuan:</label>
+                                        <input 
+                                            type="text" 
+                                            id="routeEnd" 
+                                            className="route-input" 
+                                            placeholder="Contoh: Surakarta" 
+                                            value={formEnd}
+                                            onChange={(e) => setFormEnd(e.target.value)}
+                                            required 
+                                        />
+                                        <small className="form-hint">Masukkan nama lokasi tujuan</small>
+                                    </div>
+                                    
+                                    <div className="form-actions">
+                                        <button type="submit" className="btn-save-route">💾 Simpan Rute</button>
+                                        <button type="button" className="btn-cancel-route" onClick={cancelRouteForm}>❌ Batal</button>
+                                    </div>
+                                </form>
+                                
+                                {formStatus && (
+                                    <div className={`route-form-status ${formStatus.type}`}>
+                                        {formStatus.message}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
