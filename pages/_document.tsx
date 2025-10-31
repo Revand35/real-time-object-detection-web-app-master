@@ -1,10 +1,15 @@
-import { Html, Head, Main, NextScript } from "next/document";
+import { Html, Head, Main, NextScript } from 'next/document';
 
 export default function Document() {
   return (
     <Html lang="en">
-      <title>Real-Time Object Detection</title>
       <Head>
+        {/* External CSS (Leaflet, LRM, and app map styles) */}
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+        <link rel="stylesheet" href="/map/mappp.css" />
+
+        <title>Real-Time Object Detection</title>
         <meta name="application-name" content="Real-Time Object Detection" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />

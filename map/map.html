@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Location Tracker with Route</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Leaflet Routing Machine CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="map.css">
+    <style>
+    body {
+        padding: 0;
+        margin: 0;
+    }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+
+<!-- Permission Request Popup - Modern Design -->
+<div id="permissionPopup" class="permission-popup">
+  <div class="permission-content">
+    <div class="permission-icon">📍</div>
+    <h2>Akses Lokasi Diperlukan</h2>
+    <p>Aplikasi ini memerlukan akses ke lokasi Anda saat ini untuk menampilkan:</p>
+    <ul>
+      <li>📍 Lokasi Anda saat ini di peta</li>
+      <li>🗺️ Rute dari lokasi Anda ke tujuan</li>
+      <li>📍 Update lokasi setiap 1 detik (realtime)</li>
+    </ul>
+    <button id="requestPermissionBtn" onclick="requestLocationPermission()" class="permission-btn">
+      Berikan Akses Lokasi
+    </button>
+    <p class="permission-hint">Setelah mengklik, browser akan meminta izin akses lokasi</p>
+  </div>
+</div>
+
+<!-- Mobile Toggle Button (shown only on mobile) -->
+<button id="mobileToggleBtn" class="mobile-toggle-btn" onclick="toggleStatusPanel()">
+  📍 Info Lokasi
+</button>
+
+<!-- Debug Console Toggle Button -->
+<button id="debugToggleBtn" class="debug-toggle-btn" onclick="toggleDebugPanel()" title="Toggle Debug Console">
+  🐛 Debug
+</button>
+
+<!-- Status Panel -->
+<div id="statusPanel" class="status-panel">
+  <!-- Close button for mobile (shown only on mobile) -->
+  <button id="closePanelBtn" class="close-panel-btn" onclick="toggleStatusPanel()" style="display: none;" aria-label="Tutup panel">✖️</button>
+  
+  <h3><span class="icon">📍</span> Track Your Location</h3>
+  <p id="status">Waiting for location...</p>
+  <p id="coordinates">Lat: -, Lng: -</p>
+  <p id="accuracy">Accuracy: -</p>
+  
+  <div class="route-info">
+    <h4>Live Route Tracking</h4>
+    <p>Shows route from your current location to destination</p>
+    <p class="route-update-info">Route updates every 1 second (realtime)</p>
+  </div>
+  
+  <button id="retryBtn" class="retry-button">
+    <span class="btn-icon">🔄</span>
+    <span>Coba Lagi</span>
+  </button>
+</div>
+
+<!-- Debug Console Panel -->
+<div id="debugPanel" class="debug-panel">
+  <!-- Close button for mobile (shown only on mobile) -->
+  <button id="closeDebugBtn" class="close-panel-btn" onclick="toggleDebugPanel()" style="display: none;" aria-label="Tutup debug panel">✖️</button>
+  
+  <div class="debug-header">
+    <h3><span class="icon">🐛</span> Debug Console</h3>
+    <div class="debug-controls">
+      <button id="clearDebugBtn" class="clear-debug-btn" onclick="clearDebugLogs()" title="Clear logs">🗑️ Clear</button>
+      <button id="toggleAutoScrollBtn" class="auto-scroll-btn" onclick="toggleAutoScroll()" title="Toggle auto-scroll">📜 Auto</button>
+    </div>
+  </div>
+  
+  <div id="debugLogs" class="debug-logs">
+    <p class="debug-placeholder">Console logs will appear here...</p>
+  </div>
+</div>
+
+<!-- Route Management Panel -->
+<div id="routeManagementPanel" class="route-management-panel">
+  <!-- Close button for mobile -->
+  <button id="closeRoutePanelBtn" class="close-panel-btn" onclick="toggleRouteManagementPanel()" style="display: none;" aria-label="Tutup panel rute">✖️</button>
+  
+  <div class="route-panel-header">
+    <h3><span class="icon">🗺️</span> Kelola Rute</h3>
+    <button id="routePanelToggleBtn" class="route-toggle-btn" onclick="toggleRouteManagementPanel()" title="Tutup/Buka panel">✖️</button>
+  </div>
+  
+  <div class="route-panel-content">
+    <p class="route-panel-description">
+      Atur 6 slot rute yang bisa digunakan untuk navigasi. Semua rute tersimpan di device Anda.
+    </p>
+    
+    <!-- Route List Container -->
+    <div id="routeListContainer" class="route-list-container">
+      <!-- Route items will be dynamically generated here -->
+    </div>
+    
+    <!-- Add Route Form (shown when editing) -->
+    <div id="routeFormContainer" class="route-form-container" style="display: none;">
+      <h4 id="routeFormTitle" class="route-form-title">Edit Rute</h4>
+      <form id="routeForm" onsubmit="saveRouteFromForm(event)">
+        <input type="hidden" id="routeFormId" />
+        
+        <div class="form-group">
+          <label for="routeStart">📍 Lokasi Awal:</label>
+          <input type="text" id="routeStart" class="route-input" placeholder="Contoh: SMA Negeri 1 Surakarta" required />
+          <small class="form-hint">Masukkan nama lokasi awal</small>
+        </div>
+        
+        <div class="form-group">
+          <label for="routeEnd">🎯 Lokasi Tujuan:</label>
+          <input type="text" id="routeEnd" class="route-input" placeholder="Contoh: Universitas Sebelas Maret" required />
+          <small class="form-hint">Masukkan nama lokasi tujuan</small>
+        </div>
+        
+        <div class="form-actions">
+          <button type="submit" class="btn-save-route">💾 Simpan Rute</button>
+          <button type="button" class="btn-cancel-route" onclick="cancelRouteForm()">❌ Batal</button>
+        </div>
+      </form>
+      
+      <div id="routeFormStatus" class="route-form-status"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Route Management Toggle Button -->
+<button id="routeManagementToggleBtn" class="route-management-toggle-btn" onclick="toggleRouteManagementPanel()" title="Kelola Rute">
+  🗺️ Kelola Rute
+</button>
+
+<!-- Voice Control Panel -->
+<div class="voice-panel">
+  <h4>🎤 Navigasi Suara</h4>
+  <p>Ucapkan tujuan Anda untuk bernavigasi</p>
+  
+  <!-- Hidden button for voice control - accessible via screen reader -->
+  <button id="voiceBtn" onclick="toggleVoiceListening()" style="display: none;" aria-label="Toggle voice listening" role="button" tabindex="-1">
+    🎤 Aktifkan Mikrofon
+  </button>
+  
+  <p id="voiceStatus" class="voice-status-text">
+    Senavision Siap. Ucapkan Tujuan Anda.
+  </p>
+  
+  <div class="voice-examples">
+    <p class="voice-examples-title">💡 Percobaan perintah suara:</p>
+    <p class="voice-examples-list">
+      • "Jakarta" (langsung sebutkan kota)<br>
+      • "Pergi ke Bandung" juga bisa<br>
+      • "Mulai" (setelah tujuan ditetapkan)
+    </p>
+  </div>
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- Leaflet Routing Machine JS -->
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+
+  <!-- Firebase SDK (Compat) - App & Firestore -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+  <!-- Firebase Init: Replace with your config -->
+  <script>
+  (function(){
+    // IMPORTANT: Replace the placeholder below with your Firebase project config
+    // Get it from Firebase Console > Project settings > General > Your apps (Web app)
+    window.FIREBASE_CONFIG = window.FIREBASE_CONFIG || {
+      apiKey: "AIzaSyDrKWMsQvJgtgGRvE2FEHPTnpq7MrKLQTQ",
+      authDomain: "senavision-id.firebaseapp.com",
+      projectId: "senavision-id",
+      storageBucket: "senavision-id.firebasestorage.app",
+      messagingSenderId: "1073477417711",
+      appId: "1:1073477417711:web:681c33a68733fc2b35391a"
+      // measurementId optional; not required for Firestore
+    };
+
+    try {
+      if (window.firebase && !firebase.apps.length) {
+        firebase.initializeApp(window.FIREBASE_CONFIG);
+        console.log('✅ Firebase initialized');
+      }
+    } catch (e) {
+      console.error('❌ Firebase init error:', e);
+    }
+  })();
+  </script>
+
+<!-- Custom JS -->
+<script src="index.js"></script>
+</body>
+</html>

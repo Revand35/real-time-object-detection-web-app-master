@@ -20,6 +20,7 @@ const ObjectDetectionCamera = (props: {
   const [inferenceTime, setInferenceTime] = useState<number>(0);
   const [totalTime, setTotalTime] = useState<number>(0);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const espVideoRef = useRef<HTMLVideoElement>(null); // For ESP32 stream video
   const imgRef = useRef<HTMLImageElement>(null); // For ESP32-CAM
   const videoCanvasRef = useRef<HTMLCanvasElement>(null);
   const liveDetection = useRef<boolean>(false);
@@ -32,6 +33,11 @@ const ObjectDetectionCamera = (props: {
   const ESP32_IP = '192.168.1.25';
   const ESP32_STREAM_URL = `http://${ESP32_IP}:81/stream`;
   const ESP32_CAPTURE_URL = `http://${ESP32_IP}/capture`;
+  const ESP32_PROXY_CAPTURE_URL = `/api/esp32-capture`;
+  const espFrameReady = useRef<boolean>(false);
+  // Offscreen buffer for last good ESP32 frame to avoid "image not ready" gaps
+  const espBufferCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const espBufferHasFrameRef = useRef<boolean>(false);
   const [espEndpointMode, setEspEndpointMode] = useState<'stream' | 'capture'>('capture');
   const espErrorCount = useRef<number>(0);
   
@@ -52,18 +58,12 @@ const ObjectDetectionCamera = (props: {
     })!;
 
     if (cameraSource !== 'webcam') {
-      // Capture from ESP32-S3 image
-      if (!imgRef.current || !imgRef.current.complete || !imgRef.current.naturalWidth) {
-        console.warn('ESP32-CAM image not ready');
+      // Draw from offscreen buffer if available; avoids readiness gaps
+      const buffer = espBufferCanvasRef.current;
+      if (!buffer || !espBufferHasFrameRef.current) {
         return null;
       }
-      context.drawImage(
-        imgRef.current,
-        0,
-        0,
-        canvas.width,
-        canvas.height
-      );
+      context.drawImage(buffer, 0, 0, canvas.width, canvas.height);
     } else {
       // Capture from webcam video
       if (!videoRef.current || videoRef.current.readyState !== videoRef.current.HAVE_ENOUGH_DATA) {
@@ -163,8 +163,13 @@ const ObjectDetectionCamera = (props: {
     let element: HTMLVideoElement | HTMLImageElement | null = null;
     
     if (cameraSource !== 'webcam') {
-      element = imgRef.current;
-      if (!element || !element.naturalWidth) return;
+      if (espEndpointMode === 'stream') {
+        element = espVideoRef.current;
+        if (!element || !(element as HTMLVideoElement).videoWidth) return;
+      } else {
+        element = imgRef.current;
+        if (!element || !('naturalWidth' in element) || !(element as HTMLImageElement).naturalWidth) return;
+      }
     } else {
       element = videoRef.current;
       if (!element || !element.videoWidth) return;
@@ -178,8 +183,12 @@ const ObjectDetectionCamera = (props: {
     cv.height = h;
     
     if (originalSize.current[0] === 0) {
-      if (cameraSource !== 'webcam' && element instanceof HTMLImageElement) {
-        originalSize.current = [element.naturalWidth, element.naturalHeight];
+      if (cameraSource !== 'webcam') {
+        if (espEndpointMode === 'stream' && element instanceof HTMLVideoElement) {
+          originalSize.current = [element.videoWidth, element.videoHeight];
+        } else if (element instanceof HTMLImageElement) {
+          originalSize.current = [element.naturalWidth, element.naturalHeight];
+        }
       } else if (element instanceof HTMLVideoElement) {
         originalSize.current = [element.videoWidth, element.videoHeight];
       }
@@ -188,39 +197,63 @@ const ObjectDetectionCamera = (props: {
 
   // Initialize ESP32(-S3) - handle MJPEG stream or JPEG capture with auto-fallback
   useEffect(() => {
-    if (cameraSource === 'webcam' || !imgRef.current) return;
+    if (cameraSource === 'webcam') return;
     
-    const img = imgRef.current;
-    let updateInterval: NodeJS.Timeout | null = null;
+    let updateInterval: NodeJS.Timeout | null = null; // legacy; not used after sequential polling
+    let retryTimer: NodeJS.Timeout | null = null;
+    let img: HTMLImageElement | null = null;
+    // Note: we avoid fetch+blob to bypass CORS; use direct img src refresh
     const isMjpegStream = espEndpointMode === 'stream';
     // Optimistically show the ESP image area
     setIsStreamReady(true);
     
-    const updateESP32Frame = () => {
-      if (isMjpegStream) {
-        // MJPEG stream: set sekali, biarkan koneksi terus berjalan
-        img.src = ESP32_STREAM_URL;
-      } else {
-        // Single JPEG capture: polling dengan cache-buster
-        const url = `${ESP32_CAPTURE_URL}?t=${Date.now()}`;
-        img.src = url;
-      }
+    const setNextSrc = () => {
+      if (!img) return;
+      const url = isMjpegStream
+        ? `${ESP32_STREAM_URL}?t=${Date.now()}`
+        : `${ESP32_PROXY_CAPTURE_URL}?t=${Date.now()}`;
+      // Set langsung dengan cache-buster agar transisi halus tanpa blank frame
+      img.src = url;
     };
 
     const handleLoad = () => {
       console.log('✅ ESP32 image frame loaded!');
       setIsStreamReady(true);
+      espFrameReady.current = true;
       espErrorCount.current = 0;
       setWebcamCanvasOverlaySize();
       
-      if (img.naturalWidth && originalSize.current[0] === 0) {
+      if (img && img.naturalWidth && originalSize.current[0] === 0) {
         originalSize.current = [img.naturalWidth, img.naturalHeight];
       }
       
-      if (videoCanvasRef.current) {
-        videoCanvasRef.current.width = img.offsetWidth || img.naturalWidth || 640;
-        videoCanvasRef.current.height = img.offsetHeight || img.naturalHeight || 480;
+      // Update offscreen buffer with the latest good frame
+      if (img && img.naturalWidth && img.naturalHeight) {
+        if (!espBufferCanvasRef.current) {
+          espBufferCanvasRef.current = document.createElement('canvas');
+        }
+        const buf = espBufferCanvasRef.current;
+        if (buf) {
+          if (buf.width !== img.naturalWidth || buf.height !== img.naturalHeight) {
+            buf.width = img.naturalWidth;
+            buf.height = img.naturalHeight;
+          }
+          const bctx = buf.getContext('2d');
+          if (bctx) {
+            bctx.drawImage(img, 0, 0);
+            espBufferHasFrameRef.current = true;
+          }
+        }
       }
+
+      if (videoCanvasRef.current) {
+        const w = img ? (img.offsetWidth || img.naturalWidth || 640) : 640;
+        const h = img ? (img.offsetHeight || img.naturalHeight || 480) : 480;
+        videoCanvasRef.current.width = w;
+        videoCanvasRef.current.height = h;
+      }
+      // Schedule next frame after successful load
+      retryTimer = setTimeout(() => setNextSrc(), 180);
     };
 
     const handleError = (e: Event) => {
@@ -232,24 +265,33 @@ const ObjectDetectionCamera = (props: {
         console.warn('Switching ESP32 endpoint to /capture fallback.');
         setEspEndpointMode('capture');
       }
+      // Schedule retry on error with a slightly longer delay
+      retryTimer = setTimeout(() => setNextSrc(), 350);
+    };
+    const startWhenReady = () => {
+      img = imgRef.current;
+      if (!img) {
+        retryTimer = setTimeout(startWhenReady, 50);
+        return;
+      }
+      // Setup event listeners
+      img.addEventListener('load', handleLoad);
+      img.addEventListener('error', handleError);
+      // Start first frame; subsequent frames are chained by load/error
+      setNextSrc();
     };
 
-    // Setup event listeners
-    img.addEventListener('load', handleLoad);
-    img.addEventListener('error', handleError);
-    
-    // Start: stream sekali, capture dengan interval ~10fps
-    updateESP32Frame();
-    if (!isMjpegStream) {
-      updateInterval = setInterval(updateESP32Frame, 100);
-    }
+    startWhenReady();
 
     return () => {
-      img.removeEventListener('load', handleLoad);
-      img.removeEventListener('error', handleError);
+      if (img) {
+        img.removeEventListener('load', handleLoad);
+        img.removeEventListener('error', handleError);
+        img.src = '';
+      }
       if (updateInterval) clearInterval(updateInterval);
-      // Hentikan stream MJPEG saat cleanup
-      if (isMjpegStream) img.src = '';
+      if (retryTimer) clearTimeout(retryTimer);
+      // no-op cleanup for direct img refresh
     };
   }, [cameraSource, ESP32_STREAM_URL, ESP32_CAPTURE_URL, espEndpointMode]);
 
@@ -350,7 +392,7 @@ const ObjectDetectionCamera = (props: {
             <div style={{ position: 'absolute', zIndex: 5, textAlign: 'center', color: '#a0a0a0' }}>
               <div className="w-12 h-12 border-4 border-yellow-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
               <p className="text-sm">
-                {cameraSource === 'webcam' ? 'Initializing webcam...' : (cameraSource === 'esp32-s3' ? 'Connecting to ESP32-S3...' : 'Connecting to ESP32-CAM...')}
+                {cameraSource === 'webcam' ? 'Initializing webcam...' : 'Connecting to ESP32-CAM...'}
               </p>
               <p className="text-xs mt-2 text-gray-500">
                 {cameraSource === 'webcam' ? 'Please allow camera access' : `IP: ${ESP32_IP}`}
@@ -378,10 +420,11 @@ const ObjectDetectionCamera = (props: {
             }}
           />
           
-          {/* ESP32-CAM Image - Only show when ESP32 is selected */}
+          {/* ESP32 Stream/Capture Image - stream uses MJPEG, capture uses polling */}
           <img
             ref={imgRef}
             alt="ESP32-CAM Stream"
+            crossOrigin="anonymous"
             style={{
               width: '100%',
               height: 'auto',
@@ -510,11 +553,12 @@ const ObjectDetectionCamera = (props: {
                 onClick={() => {
                   setIsStreamReady(false);
                   setCameraSource('esp32-s3');
+                  setEspEndpointMode('capture');
                   reset();
                 }}
                 className={`flex-1 modern-button text-xs py-2.5 font-medium ${cameraSource !== 'webcam' ? 'button-active' : 'button-gradient-switch'}`}
               >
-                ESP32-S3
+                ESP32-CAM
               </button>
             </div>
             {cameraSource !== 'webcam' && (
