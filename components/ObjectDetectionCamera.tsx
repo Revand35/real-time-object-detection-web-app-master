@@ -20,7 +20,7 @@ const ObjectDetectionCamera = (props: {
   const [inferenceTime, setInferenceTime] = useState<number>(0);
   const [totalTime, setTotalTime] = useState<number>(0);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const espVideoRef = useRef<HTMLVideoElement>(null); // For ESP32 stream video
+  // espVideoRef tidak digunakan lagi - stream mode sekarang menggunakan img tag dengan polling cepat
   const imgRef = useRef<HTMLImageElement>(null); // For ESP32-CAM
   const videoCanvasRef = useRef<HTMLCanvasElement>(null);
   const liveDetection = useRef<boolean>(false);
@@ -28,9 +28,10 @@ const ObjectDetectionCamera = (props: {
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [isStreamReady, setIsStreamReady] = useState<boolean>(false);
   const [cameraSource, setCameraSource] = useState<'webcam' | 'esp32' | 'esp32-s3'>('webcam');
+  const [isMounted, setIsMounted] = useState<boolean>(false); // Untuk menghindari hydration error
   
   // ESP32-CAM Configuration
-  const ESP32_IP = '192.168.1.25';
+  const ESP32_IP = '192.168.1.19';
   const ESP32_STREAM_URL = `http://${ESP32_IP}:81/stream`;
   const ESP32_CAPTURE_URL = `http://${ESP32_IP}/capture`;
   const ESP32_PROXY_CAPTURE_URL = `/api/esp32-capture`;
@@ -38,7 +39,9 @@ const ObjectDetectionCamera = (props: {
   // Offscreen buffer for last good ESP32 frame to avoid "image not ready" gaps
   const espBufferCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const espBufferHasFrameRef = useRef<boolean>(false);
-  const [espEndpointMode, setEspEndpointMode] = useState<'stream' | 'capture'>('capture');
+  // Default ke stream mode untuk performa lebih baik
+  const [espEndpointMode, setEspEndpointMode] = useState<'stream' | 'capture'>('stream');
+  const ESP32_PROXY_STREAM_URL = `/api/esp32-stream`;
   const espErrorCount = useRef<number>(0);
   
   const originalSize = useRef<number[]>([0, 0]);
@@ -58,14 +61,15 @@ const ObjectDetectionCamera = (props: {
     })!;
 
     if (cameraSource !== 'webcam') {
-      // Draw from offscreen buffer if available; avoids readiness gaps
+      // ESP32 mode: baik stream maupun capture menggunakan buffer dari img tag
+      // Buffer diupdate setiap kali frame baru dimuat
       const buffer = espBufferCanvasRef.current;
       if (!buffer || !espBufferHasFrameRef.current) {
         return null;
       }
       context.drawImage(buffer, 0, 0, canvas.width, canvas.height);
     } else {
-      // Capture from webcam video
+      // Capture dari webcam video
       if (!videoRef.current || videoRef.current.readyState !== videoRef.current.HAVE_ENOUGH_DATA) {
         console.warn('Webcam video not ready');
         return null;
@@ -137,6 +141,9 @@ const ObjectDetectionCamera = (props: {
   };
 
   const processImage = async () => {
+    // Hanya jalankan di browser environment
+    if (typeof document === 'undefined') return;
+    
     reset();
     const ctx = capture();
     if (!ctx) return;
@@ -163,13 +170,9 @@ const ObjectDetectionCamera = (props: {
     let element: HTMLVideoElement | HTMLImageElement | null = null;
     
     if (cameraSource !== 'webcam') {
-      if (espEndpointMode === 'stream') {
-        element = espVideoRef.current;
-        if (!element || !(element as HTMLVideoElement).videoWidth) return;
-      } else {
-        element = imgRef.current;
-        if (!element || !('naturalWidth' in element) || !(element as HTMLImageElement).naturalWidth) return;
-      }
+      // ESP32 mode: selalu gunakan img tag (baik stream maupun capture)
+      element = imgRef.current;
+      if (!element || !('naturalWidth' in element) || !(element as HTMLImageElement).naturalWidth) return;
     } else {
       element = videoRef.current;
       if (!element || !element.videoWidth) return;
@@ -184,12 +187,12 @@ const ObjectDetectionCamera = (props: {
     
     if (originalSize.current[0] === 0) {
       if (cameraSource !== 'webcam') {
-        if (espEndpointMode === 'stream' && element instanceof HTMLVideoElement) {
-          originalSize.current = [element.videoWidth, element.videoHeight];
-        } else if (element instanceof HTMLImageElement) {
+        // ESP32 mode: selalu gunakan img tag (baik stream maupun capture)
+        if (element instanceof HTMLImageElement) {
           originalSize.current = [element.naturalWidth, element.naturalHeight];
         }
       } else if (element instanceof HTMLVideoElement) {
+        // Webcam mode: gunakan video tag
         originalSize.current = [element.videoWidth, element.videoHeight];
       }
     }
@@ -202,62 +205,78 @@ const ObjectDetectionCamera = (props: {
     let updateInterval: NodeJS.Timeout | null = null; // legacy; not used after sequential polling
     let retryTimer: NodeJS.Timeout | null = null;
     let img: HTMLImageElement | null = null;
-    // Note: we avoid fetch+blob to bypass CORS; use direct img src refresh
+    let video: HTMLVideoElement | null = null;
+    // Note: stream mode menggunakan video tag, capture mode menggunakan img tag polling
     const isMjpegStream = espEndpointMode === 'stream';
-    // Optimistically show the ESP image area
+    // Optimistically show the ESP image/video area
     setIsStreamReady(true);
     
     const setNextSrc = () => {
-      if (!img) return;
-      const url = isMjpegStream
-        ? `${ESP32_STREAM_URL}?t=${Date.now()}`
-        : `${ESP32_PROXY_CAPTURE_URL}?t=${Date.now()}`;
-      // Set langsung dengan cache-buster agar transisi halus tanpa blank frame
-      img.src = url;
+      if (isMjpegStream) {
+        // Untuk stream mode, gunakan img tag dengan polling cepat (50-80ms) untuk efek stream yang halus
+        if (!img) return;
+        const url = `${ESP32_PROXY_STREAM_URL}?t=${Date.now()}`;
+        img.src = url;
+      } else {
+        // Untuk capture mode, gunakan polling dengan interval lebih lama (180ms)
+        if (!img) return;
+        const url = `${ESP32_PROXY_CAPTURE_URL}?t=${Date.now()}`;
+        img.src = url;
+      }
     };
 
     const handleLoad = () => {
-      console.log('✅ ESP32 image frame loaded!');
-      setIsStreamReady(true);
-      espFrameReady.current = true;
-      espErrorCount.current = 0;
-      setWebcamCanvasOverlaySize();
-      
-      if (img && img.naturalWidth && originalSize.current[0] === 0) {
-        originalSize.current = [img.naturalWidth, img.naturalHeight];
-      }
-      
-      // Update offscreen buffer with the latest good frame
-      if (img && img.naturalWidth && img.naturalHeight) {
-        if (!espBufferCanvasRef.current) {
-          espBufferCanvasRef.current = document.createElement('canvas');
+      // Handler untuk img tag (baik stream maupun capture mode)
+      if (img) {
+        if (isMjpegStream) {
+          console.log('✅ ESP32 stream frame loaded!');
+        } else {
+          console.log('✅ ESP32 image frame loaded!');
         }
-        const buf = espBufferCanvasRef.current;
-        if (buf) {
-          if (buf.width !== img.naturalWidth || buf.height !== img.naturalHeight) {
-            buf.width = img.naturalWidth;
-            buf.height = img.naturalHeight;
+        setIsStreamReady(true);
+        espFrameReady.current = true;
+        espErrorCount.current = 0;
+        setWebcamCanvasOverlaySize();
+        
+        if (img.naturalWidth && originalSize.current[0] === 0) {
+          originalSize.current = [img.naturalWidth, img.naturalHeight];
+        }
+        
+        // Update offscreen buffer dengan frame terakhir yang berhasil
+        if (img.naturalWidth && img.naturalHeight) {
+          // Hanya buat canvas jika belum ada dan di browser environment
+          if (!espBufferCanvasRef.current && typeof document !== 'undefined') {
+            espBufferCanvasRef.current = document.createElement('canvas');
           }
-          const bctx = buf.getContext('2d');
-          if (bctx) {
-            bctx.drawImage(img, 0, 0);
-            espBufferHasFrameRef.current = true;
+          const buf = espBufferCanvasRef.current;
+          if (buf) {
+            if (buf.width !== img.naturalWidth || buf.height !== img.naturalHeight) {
+              buf.width = img.naturalWidth;
+              buf.height = img.naturalHeight;
+            }
+            const bctx = buf.getContext('2d');
+            if (bctx) {
+              bctx.drawImage(img, 0, 0);
+              espBufferHasFrameRef.current = true;
+            }
           }
         }
-      }
 
-      if (videoCanvasRef.current) {
-        const w = img ? (img.offsetWidth || img.naturalWidth || 640) : 640;
-        const h = img ? (img.offsetHeight || img.naturalHeight || 480) : 480;
-        videoCanvasRef.current.width = w;
-        videoCanvasRef.current.height = h;
+        if (videoCanvasRef.current) {
+          const w = img.offsetWidth || img.naturalWidth || 640;
+          const h = img.offsetHeight || img.naturalHeight || 480;
+          videoCanvasRef.current.width = w;
+          videoCanvasRef.current.height = h;
+        }
+        // Schedule next frame: stream mode lebih cepat (50-80ms), capture mode lebih lambat (180ms)
+        const delay = isMjpegStream ? 70 : 180;
+        retryTimer = setTimeout(() => setNextSrc(), delay);
       }
-      // Schedule next frame after successful load
-      retryTimer = setTimeout(() => setNextSrc(), 180);
     };
 
+
     const handleError = (e: Event) => {
-      console.error('ESP32-CAM load error:', e);
+      console.error('ESP32-CAM error:', e);
       setIsStreamReady(false);
       espErrorCount.current += 1;
       // Auto fallback ke /capture setelah beberapa kegagalan saat di mode stream
@@ -265,25 +284,28 @@ const ObjectDetectionCamera = (props: {
         console.warn('Switching ESP32 endpoint to /capture fallback.');
         setEspEndpointMode('capture');
       }
-      // Schedule retry on error with a slightly longer delay
-      retryTimer = setTimeout(() => setNextSrc(), 350);
+      // Schedule retry on error dengan delay sedikit lebih lama
+      if (!isMjpegStream) {
+        retryTimer = setTimeout(() => setNextSrc(), 350);
+      }
     };
+
     const startWhenReady = () => {
+      // Baik stream maupun capture mode menggunakan img tag
       img = imgRef.current;
       if (!img) {
         retryTimer = setTimeout(startWhenReady, 50);
         return;
       }
-      // Setup event listeners
       img.addEventListener('load', handleLoad);
       img.addEventListener('error', handleError);
-      // Start first frame; subsequent frames are chained by load/error
       setNextSrc();
     };
 
     startWhenReady();
 
     return () => {
+      // Cleanup event listeners
       if (img) {
         img.removeEventListener('load', handleLoad);
         img.removeEventListener('error', handleError);
@@ -291,9 +313,8 @@ const ObjectDetectionCamera = (props: {
       }
       if (updateInterval) clearInterval(updateInterval);
       if (retryTimer) clearTimeout(retryTimer);
-      // no-op cleanup for direct img refresh
     };
-  }, [cameraSource, ESP32_STREAM_URL, ESP32_CAPTURE_URL, espEndpointMode]);
+  }, [cameraSource, ESP32_STREAM_URL, ESP32_CAPTURE_URL, ESP32_PROXY_CAPTURE_URL, ESP32_PROXY_STREAM_URL, espEndpointMode]);
 
   // Initialize webcam - menggunakan MediaDevices API untuk akses webcam laptop
   useEffect(() => {
@@ -368,8 +389,16 @@ const ObjectDetectionCamera = (props: {
     };
   }, [cameraSource, facingMode]);
 
+  // Set mounted flag untuk menghindari hydration error
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   // Close camera when browser tab is minimized
   useEffect(() => {
+    // Hanya jalankan di client (browser)
+    if (typeof document === 'undefined') return;
+    
     const handleVisibilityChange = () => {
       if (document.hidden) {
         liveDetection.current = false;
@@ -420,23 +449,26 @@ const ObjectDetectionCamera = (props: {
             }}
           />
           
-          {/* ESP32 Stream/Capture Image - stream uses MJPEG, capture uses polling */}
-          <img
-            ref={imgRef}
-            alt="ESP32-CAM Stream"
-            crossOrigin="anonymous"
-            style={{
-              width: '100%',
-              height: 'auto',
-              borderRadius: '20px',
-              objectFit: 'contain',
-              display: (cameraSource !== 'webcam') ? 'block' : 'none',
-              maxHeight: '480px'
-            }}
-            onLoad={() => {
-              setWebcamCanvasOverlaySize();
-            }}
-          />
+          {/* ESP32 Stream/Capture Image - stream uses fast polling, capture uses slower polling */}
+          {/* Hanya render img tag setelah komponen di-mount di client untuk menghindari hydration error */}
+          {isMounted && (
+            <img
+              ref={imgRef}
+              alt="ESP32-CAM Capture"
+              crossOrigin="anonymous"
+              style={{
+                width: '100%',
+                height: 'auto',
+                borderRadius: '20px',
+                objectFit: 'contain',
+                display: (cameraSource !== 'webcam' && (espEndpointMode === 'capture' || espEndpointMode === 'stream')) ? 'block' : 'none',
+                maxHeight: '480px'
+              }}
+              onLoad={() => {
+                setWebcamCanvasOverlaySize();
+              }}
+            />
+          )}
           
           <canvas
             ref={displayCanvasRef}
@@ -553,7 +585,8 @@ const ObjectDetectionCamera = (props: {
                 onClick={() => {
                   setIsStreamReady(false);
                   setCameraSource('esp32-s3');
-                  setEspEndpointMode('capture');
+                  // Default ke stream mode untuk performa lebih baik
+                  setEspEndpointMode('stream');
                   reset();
                 }}
                 className={`flex-1 modern-button text-xs py-2.5 font-medium ${cameraSource !== 'webcam' ? 'button-active' : 'button-gradient-switch'}`}
@@ -562,9 +595,37 @@ const ObjectDetectionCamera = (props: {
               </button>
             </div>
             {cameraSource !== 'webcam' && (
-              <p className="text-xs text-gray-500 mt-2 text-center">
-                IP: {ESP32_IP}
-              </p>
+              <>
+                <p className="text-xs text-gray-500 mt-2 text-center">
+                  IP: {ESP32_IP}
+                </p>
+                {/* Toggle Stream/Capture Mode */}
+                <div className="flex gap-2 mt-3 pt-3 border-t border-gray-700/50">
+                  <button
+                    onClick={() => {
+                      setIsStreamReady(false);
+                      setEspEndpointMode('stream');
+                      reset();
+                    }}
+                    className={`flex-1 modern-button text-xs py-2.5 font-medium ${espEndpointMode === 'stream' ? 'button-active' : 'button-gradient-switch'}`}
+                  >
+                    Stream
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsStreamReady(false);
+                      setEspEndpointMode('capture');
+                      reset();
+                    }}
+                    className={`flex-1 modern-button text-xs py-2.5 font-medium ${espEndpointMode === 'capture' ? 'button-active' : 'button-gradient-switch'}`}
+                  >
+                    Capture
+                  </button>
+                </div>
+                <p className="text-xs text-gray-600 mt-2 text-center">
+                  Mode: <span className="font-semibold text-yellow-400">{espEndpointMode === 'stream' ? 'MJPEG Stream' : 'JPEG Polling'}</span>
+                </p>
+              </>
             )}
           </div>
         </div>

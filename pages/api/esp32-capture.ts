@@ -2,8 +2,9 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { Readable } from 'stream';
 
 // Simple same-origin proxy for ESP32 /capture to avoid CORS-tainted canvas
-// NOTE: Adjust the IP if needed or make it configurable via env
-const ESP32_IP = '192.168.1.25';
+// NOTE: IP harus sama dengan yang ada di ObjectDetectionCamera.tsx
+// Bisa dikonfigurasi via environment variable NEXT_PUBLIC_ESP32_IP jika perlu
+const ESP32_IP = process.env.NEXT_PUBLIC_ESP32_IP || '192.168.1.19';
 const ESP32_CAPTURE_URL = `http://${ESP32_IP}/capture`;
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -17,7 +18,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const upstream = await fetch(upstreamUrl, { cache: 'no-store', signal: ac.signal });
     clearTimeout(timeout);
     if (!upstream.ok) {
-      res.status(upstream.status).send(`Upstream error: ${upstream.status}`);
+      res.status(upstream.status).json({ 
+        error: 'ESP32 upstream error', 
+        message: `ESP32-CAM returned status ${upstream.status}. Please check ESP32-CAM status.` 
+      });
       return;
     }
 
@@ -42,7 +46,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.status(200).send(Buffer.from(arrayBuffer));
     }
   } catch (err: any) {
-    res.status(500).send(`Proxy error: ${err?.message || 'unknown error'}`);
+    // Error handling yang lebih informatif
+    console.error('ESP32-CAM proxy error:', err?.message || err);
+    
+    // Jika error karena timeout atau network, beri pesan yang jelas
+    if (err?.name === 'AbortError' || err?.code === 'ETIMEDOUT') {
+      res.status(504).json({ 
+        error: 'ESP32 timeout', 
+        message: `Cannot connect to ESP32-CAM at ${ESP32_IP}. Please check if ESP32 is powered and on the same network.` 
+      });
+    } else if (err?.code === 'ENOTFOUND' || err?.code === 'ECONNREFUSED') {
+      res.status(503).json({ 
+        error: 'ESP32 unreachable', 
+        message: `Cannot reach ESP32-CAM at ${ESP32_IP}. Please verify the IP address is correct.` 
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Proxy error', 
+        message: err?.message || 'Unknown error occurred while fetching from ESP32-CAM' 
+      });
+    }
   }
 }
 

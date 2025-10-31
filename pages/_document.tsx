@@ -4,10 +4,8 @@ export default function Document() {
   return (
     <Html lang="en">
       <Head>
-        {/* External CSS (Leaflet, LRM, and app map styles) */}
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-        <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
-        <link rel="stylesheet" href="/map/mappp.css" />
+        {/* External CSS (Leaflet, LRM - only load if needed for map page) */}
+        {/* Note: map.css styles are loaded conditionally by the map page itself */}
 
         <title>Real-Time Object Detection</title>
         <meta name="application-name" content="Real-Time Object Detection" />
